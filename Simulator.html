@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>CowSimulator - 关卡模拟</title>
+  <link rel="stylesheet" href="style.css">
+  <style>
+    /* 已标记为"牛"的格子添加淡金色背景强调 */
+    .cell-state-cow { background-blend-mode: overlay; }
+    /* 已标记为"X"的格子添加淡红色背景强调 */
+    .cell-state-x   { background-blend-mode: overlay; }
+  </style>
+</head>
+<body>
+<div class="app-layout">
+
+  <!-- 左侧工具栏 -->
+  <div class="sidebar">
+    <a href="index.html" class="sidebar-title" style="text-decoration:none">🐄 CowSimulator</a>
+
+    <a href="index.html" class="tool-btn" style="text-decoration:none">
+      <span class="icon">◀</span> 返回主页
+    </a>
+
+    <hr class="sidebar-sep">
+
+    <button class="tool-btn" id="btn-load">
+      <span class="icon">📂</span> 读取关卡
+    </button>
+    <!-- 隐藏的文件选择输入框 -->
+    <input type="file" id="file-input" accept=".cow" style="display:none">
+
+    <hr class="sidebar-sep">
+
+    <button class="tool-btn" id="btn-reset">
+      <span class="icon">🔄</span> 刷新关卡状态
+    </button>
+
+    <hr class="sidebar-sep">
+
+    <!-- 确认答案按钮：使用强调色样式 -->
+    <button class="tool-btn" id="btn-check"
+      style="background:var(--accent);color:#1a1a2e;font-weight:700;border-color:var(--accent)">
+      <span class="icon">✅</span> 确认答案
+    </button>
+
+    <hr class="sidebar-sep">
+
+    <!-- 操作说明文字 -->
+    <div style="font-size:0.75rem;color:var(--muted);padding:0.5rem;line-height:1.8">
+      <b style="color:var(--text)">操作说明</b><br>
+      · 双击 → 标记 🐄<br>
+      · 单击/拖动 → 标记 ✕<br>
+      · 再次操作取消标记
+    </div>
+  </div>
+
+  <!-- 主内容区 -->
+  <div class="main-area">
+    <div class="top-bar">
+      <span style="font-weight:700;color:var(--accent)">关卡模拟</span>
+      <!-- 剩余标定方块数量徽章 -->
+      <span class="remain-badge" id="badge-remain">剩余标定方块：—</span>
+      <span class="info-chip" id="chip-size">尺寸：—</span>
+      <span id="status-area"></span>
+    </div>
+    <div class="canvas-area" id="canvas-area">
+      <div style="color:var(--muted);text-align:center">
+        <div style="font-size:3rem;margin-bottom:1rem">🎮</div>
+        <div>点击左侧「读取关卡」开始游戏</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 胜利弹层 -->
+<div class="win-overlay" id="win-overlay" style="display:none">
+  <div class="win-emoji">🎉</div>
+  <div style="margin-top:1rem">恭喜！全部正确！</div>
+  <button class="btn btn-primary"
+    style="margin-top:1.5rem;font-size:1rem;"
+    onclick="document.getElementById('win-overlay').style.display='none'">
+    继续
+  </button>
+</div>
+
+<!-- 答案错误弹层 -->
+<div class="win-overlay" id="fail-overlay" style="display:none;background:#0009">
+  <div style="font-size:3rem">😢</div>
+  <div style="margin-top:1rem;color:#e94560">答案有误，请继续尝试</div>
+  <div id="fail-detail"
+    style="font-size:0.85rem;color:#aaa;margin-top:0.5rem;max-width:320px;text-align:center">
+  </div>
+  <button class="btn btn-secondary"
+    style="margin-top:1.5rem;font-size:1rem;"
+    onclick="document.getElementById('fail-overlay').style.display='none'">
+    返回
+  </button>
+</div>
+
+<script>
+// ──────────────────────────────────────────
+//  状态设置
+// ──────────────────────────────────────────
+const COLORS = [
+  null,          // 0 = 空白
+  '#c2658b',     // 1
+  '#acd994',     // 2
+  '#ab6d45',     // 3
+  '#68bce6',     // 4
+  '#ffa0ec',     // 5
+  '#e2ba45',     // 6
+  '#6082b5',     // 7
+  '#9178d0',     // 8
+  '#47b3b0',     // 9
+  '#ffa96c',     // 10
+  '#a7bed9',     // 11
+  '#ff5722',     // 12
+  '#e6a8c0',     // 13
+  '#9c27b0',     // 14
+  '#ffeb3b',     // 15
+];
+
+// 模拟器全局状态
+let state = {
+  n: 0,
+  grid: [],              // n×n 颜色索引矩阵
+  answer: new Set(),     // 正确标定方块位置（从文件读取，玩家不可见）
+  playerCow: new Set(),  // 玩家标记为"标定方块"的格子，格式 "行,列"
+  playerX: new Set(),    // 玩家标记为"X（排除）"的格子，格式 "行,列"
+  dragging: false,       // 是否正在拖动标记 X
+  dragMode: null,        // 拖动模式：'x-set'（设置X）| 'x-clear'（清除X）
+  lastClickTime: 0,      // 上次点击时间戳（用于双击检测）
+  lastClickCell: null,   // 上次点击的格子键（用于双击检测）
+};
+
+// ──────────────────────────────────────────
+//  读取关卡文件
+// ──────────────────────────────────────────
+function loadCow(file) {
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      const data = JSON.parse(e.target.result);
+      if (!data.n || !data.grid) throw new Error('格式错误');
+      // 恢复关卡数据，正确答案隐藏（不显示给玩家）
+      state.n = data.n;
+      state.grid = data.grid;
+      state.answer = new Set(data.markers || []);
+      state.playerCow = new Set();
+      state.playerX = new Set();
+      renderGrid();
+      updateBadge();
+      document.getElementById('chip-size').textContent = `尺寸：${data.n}×${data.n}`;
+      showStatus(`关卡已加载 (${data.n}×${data.n})，共 ${state.answer.size} 个标定方块`, 'ok');
+    } catch(err) {
+      showStatus('读取失败：' + err.message, 'err');
+    }
+  };
+  reader.readAsText(file);
+}
+
+// ──────────────────────────────────────────
+//  渲染网格
+// ──────────────────────────────────────────
+function renderGrid() {
+  const area = document.getElementById('canvas-area');
+  // 根据矩阵大小自动计算格子尺寸，保持在 28~56px 之间
+  const size = Math.max(28, Math.min(56, Math.floor(560 / state.n)));
+  const table = document.createElement('table');
+  table.className = 'grid-table';
+  table.style.setProperty('--cell-size', size + 'px');
+
+  for (let r = 0; r < state.n; r++) {
+    const tr = document.createElement('tr');
+    for (let c = 0; c < state.n; c++) {
+      const td = document.createElement('td');
+      td.dataset.r = r;
+      td.dataset.c = c;
+      applyCell(td, r, c);
+      tr.appendChild(td);
+    }
+    table.appendChild(tr);
+  }
+
+  // 绑定鼠标事件
+  table.addEventListener('mousedown', onMouseDown);
+  table.addEventListener('mouseover', onMouseOver);
+  document.addEventListener('mouseup', () => { state.dragging = false; state.dragMode = null; });
+
+  area.innerHTML = '';
+  area.appendChild(table);
+}
+
+// 根据玩家标记状态更新单个格子的视觉表现
+function applyCell(td, r, c) {
+  const ci = state.grid[r][c];
+  td.style.background = COLORS[ci] || '#1e1e3a';
+  td.innerHTML = '';
+  const key = `${r},${c}`;
+  if (state.playerCow.has(key)) {
+    // 玩家标记为标定方块：显示牛图标
+    const span = document.createElement('span');
+    span.className = 'cell-mark';
+    span.textContent = '🐄';
+    td.appendChild(span);
+  } else if (state.playerX.has(key)) {
+    // 玩家标记为排除：显示红色 ✕
+    const span = document.createElement('span');
+    span.className = 'cell-mark';
+    span.style.fontSize = '1.1rem';
+    span.style.color = '#e94560';
+    span.style.fontWeight = '900';
+    span.textContent = '✕';
+    td.appendChild(span);
+  }
+}
+
+// 刷新指定格子的显示
+function refreshCell(r, c) {
+  const td = document.querySelector(`td[data-r="${r}"][data-c="${c}"]`);
+  if (td) applyCell(td, r, c);
+}
+
+// ──────────────────────────────────────────
+//  鼠标事件处理（含双击检测）
+// ──────────────────────────────────────────
+
+// 双击判定时间阈值（毫秒）
+const DBLCLICK_MS = 280;
+
+// 从事件目标获取格子坐标
+function getCell(e) {
+  const td = e.target.closest('td');
+  if (!td) return null;
+  return { r: +td.dataset.r, c: +td.dataset.c };
+}
+
+// 鼠标按下：区分单击（标记X）和双击（标记牛）
+function onMouseDown(e) {
+  if (!state.n) return;
+  e.preventDefault();
+  const pos = getCell(e);
+  if (!pos) return;
+  const key = `${pos.r},${pos.c}`;
+  const now = Date.now();
+
+  // 双击检测：在阈值时间内点击同一格视为双击
+  const isDouble = (now - state.lastClickTime) < DBLCLICK_MS && state.lastClickCell === key;
+  state.lastClickTime = now;
+  state.lastClickCell = key;
+
+  if (isDouble) {
+    // 双击：切换标定方块标记（清除X标记，改为牛标记）
+    state.lastClickTime = 0; // 重置防止三击触发第二次双击
+    if (state.playerCow.has(key)) {
+      state.playerCow.delete(key); // 已有牛标记则取消
+    } else {
+      state.playerCow.add(key);
+      state.playerX.delete(key);   // 清除该格的X标记
+    }
+    refreshCell(pos.r, pos.c);
+    updateBadge();
+    return;
+  }
+
+  // 单击：切换X排除标记，同时开启拖动模式
+  if (state.playerX.has(key)) {
+    state.dragMode = 'x-clear'; // 已有X，拖动时清除X
+    state.playerX.delete(key);
+  } else {
+    state.dragMode = 'x-set';   // 无X，拖动时批量设置X
+    state.playerX.add(key);
+    state.playerCow.delete(key); // 清除该格的牛标记
+  }
+  state.dragging = true;
+  refreshCell(pos.r, pos.c);
+  updateBadge();
+}
+
+// 鼠标滑过：拖动批量设置/清除X标记
+function onMouseOver(e) {
+  if (!state.dragging || !state.dragMode) return;
+  const pos = getCell(e);
+  if (!pos) return;
+  const key = `${pos.r},${pos.c}`;
+  if (state.dragMode === 'x-set') {
+    // 拖动设置X：跳过已有X的格子
+    if (!state.playerX.has(key)) {
+      state.playerX.add(key);
+      state.playerCow.delete(key);
+      refreshCell(pos.r, pos.c);
+      updateBadge();
+    }
+  } else {
+    // 拖动清除X：跳过未标X的格子
+    if (state.playerX.has(key)) {
+      state.playerX.delete(key);
+      refreshCell(pos.r, pos.c);
+      updateBadge();
+    }
+  }
+}
+
+// ──────────────────────────────────────────
+//  顶部剩余数量徽章更新
+// ──────────────────────────────────────────
+function updateBadge() {
+  const total = state.answer.size;
+  const placed = state.playerCow.size;
+  const remain = Math.max(0, total - placed); // 剩余未标记数量（不低于0）
+  document.getElementById('badge-remain').textContent =
+    `剩余标定方块：${remain} / ${total}`;
+}
+
+// ──────────────────────────────────────────
+//  答案校验
+// ──────────────────────────────────────────
+function checkAnswer() {
+  if (!state.n) { showStatus('请先读取关卡', 'err'); return; }
+
+  const correct = state.answer;
+  const player  = state.playerCow;
+
+  // 统计多余标记（玩家标了但不在答案中）和遗漏标记（答案中有但玩家未标）
+  const extra  = [...player].filter(k => !correct.has(k));
+  const missed = [...correct].filter(k => !player.has(k));
+
+  if (extra.length === 0 && missed.length === 0) {
+    // 全部正确，显示胜利弹层
+    document.getElementById('win-overlay').style.display = '';
+  } else {
+    // 有误，显示错误详情
+    let detail = '';
+    if (extra.length)  detail += `错误标记 ${extra.length} 处。`;
+    if (missed.length) detail += `遗漏 ${missed.length} 处。`;
+    document.getElementById('fail-detail').textContent = detail;
+    document.getElementById('fail-overlay').style.display = '';
+  }
+}
+
+// ──────────────────────────────────────────
+//  刷新关卡（清空所有玩家标记，回到初始游玩状态）
+// ──────────────────────────────────────────
+function resetLevel() {
+  if (!state.n) return;
+  state.playerCow.clear();
+  state.playerX.clear();
+  renderGrid();
+  updateBadge();
+  showStatus('关卡已重置', 'info');
+}
+
+// ──────────────────────────────────────────
+//  状态消息显示（4秒后自动消失）
+// ──────────────────────────────────────────
+function showStatus(msg, type = 'info') {
+  const el = document.getElementById('status-area');
+  el.innerHTML = `<span class="status-msg ${type}">${msg}</span>`;
+  setTimeout(() => el.innerHTML = '', 4000);
+}
+
+// ──────────────────────────────────────────
+//  按钮事件绑定
+// ──────────────────────────────────────────
+
+// 读取关卡
+document.getElementById('btn-load').addEventListener('click', () => {
+  document.getElementById('file-input').click();
+});
+document.getElementById('file-input').addEventListener('change', e => {
+  if (e.target.files[0]) loadCow(e.target.files[0]);
+  e.target.value = ''; // 重置输入框，允许重复选择同一文件
+});
+
+// 刷新关卡状态
+document.getElementById('btn-reset').addEventListener('click', resetLevel);
+
+// 确认答案
+document.getElementById('btn-check').addEventListener('click', checkAnswer);
+</script>
+</body>
+</html>
